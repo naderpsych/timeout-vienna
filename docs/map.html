@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<title>מפת ההמלצות בווינה</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root{--bg:#f4f4f2;--card:#fff;--text:#1b1b1b;--muted:#6c6f74;--accent:#c8102e;--border:#e3e4e6;--chip:#ececee}
+  [data-theme="dark"]{--bg:#151515;--card:#1f1f1f;--text:#eeeeea;--muted:#9b9b9b;--accent:#ff5f6d;--border:#2e2e2e;--chip:#282828}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font-family:"Segoe UI","Heebo",Arial,sans-serif;background:var(--bg);color:var(--text)}
+  #map{position:absolute;inset:0}
+  .topbar{position:absolute;top:0;inset-inline:0;z-index:500;display:flex;align-items:center;
+          gap:8px;padding:10px 12px;flex-wrap:wrap}
+  .topbar a,.topbar button,.topbar select{
+    border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:11px;
+    padding:9px 13px;font-size:.86rem;font-weight:600;text-decoration:none;cursor:pointer;
+    font-family:inherit;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.14)}
+  #locate{background:var(--accent);color:#fff;border-color:var(--accent)}
+  #count{margin-inline-start:auto;color:var(--muted);font-size:.78rem;font-weight:400}
+  .leaflet-popup-content{margin:12px 14px;direction:rtl;text-align:right;font-family:inherit;min-width:195px}
+  .pop-name{font-size:1.02rem;font-weight:700;margin-bottom:3px}
+  .pop-type{color:var(--accent);font-size:.78rem;font-weight:700}
+  .pop-row{font-size:.81rem;margin-top:5px;line-height:1.45}
+  .pop-links{margin-top:9px;display:flex;gap:10px;font-size:.79rem}
+  .pop-links a{color:var(--accent);font-weight:600;text-decoration:none}
+  .me-dot{background:#1a73e8;border:3px solid #fff;border-radius:50%;width:16px;height:16px;
+          box-shadow:0 0 0 5px rgba(26,115,232,.25)}
+  .toast{position:absolute;bottom:18px;inset-inline:14px;z-index:600;background:var(--card);
+         border:1px solid var(--border);border-radius:12px;padding:11px 14px;font-size:.85rem;
+         box-shadow:0 3px 14px rgba(0,0,0,.18)}
+  .toast[hidden]{display:none}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="topbar">
+  <a href="./">← לרשימה</a>
+  <button id="locate">📍 מה קרוב אליי</button>
+  <select id="typeSel"><option value="">כל הסוגים</option></select>
+  <button id="favOnly">❤️ מועדפים</button>
+  <span id="count"></span>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const NS = "לא צוין";
+document.documentElement.dataset.theme =
+  localStorage.getItem("vienna_theme") ||
+  (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+
+const favs = new Set(JSON.parse(localStorage.getItem("vienna_favs") || "[]"));
+const map = L.map("map", { zoomControl: false }).setView([48.2082, 16.3738], 13);
+L.control.zoom({ position: "bottomleft" }).addTo(map);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+  { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, m =>
+  ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
+const has = v => v && v !== NS;
+const keyOf = c => c.name.trim().toLowerCase();
+const toast = (msg, ms = 5500) => {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.hidden = false;
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, ms);
+};
+const km = (a, b, c, d) => {
+  const R = 6371, r = x => x * Math.PI / 180;
+  const dLat = r(c - a), dLon = r(d - b);
+  const h = Math.sin(dLat/2)**2 + Math.cos(r(a)) * Math.cos(r(c)) * Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+};
+const fmtKm = d => d < 1 ? Math.round(d*1000/10)*10 + " מ'" : d.toFixed(1) + ' ק"מ';
+
+let all = [], layer = L.layerGroup().addTo(map), meMarker = null;
+let filterType = "", onlyFavs = false;
+
+fetch("data.json?t=" + Date.now()).then(r => r.json()).then(data => {
+  all = data.cards.filter(c => c.lat);
+  const sel = document.getElementById("typeSel");
+  [...new Set(all.map(c => c.type))].sort().forEach(t =>
+    sel.insertAdjacentHTML("beforeend", `<option value="${esc(t)}">${esc(t)}</option>`));
+  sel.onchange = () => { filterType = sel.value; draw(); };
+  draw();
+}).catch(() => toast("לא הצלחתי לטעון את הנתונים"));
+
+document.getElementById("favOnly").onclick = e => {
+  onlyFavs = !onlyFavs;
+  e.target.style.background = onlyFavs ? "var(--accent)" : "var(--card)";
+  e.target.style.color = onlyFavs ? "#fff" : "var(--text)";
+  draw();
+};
+
+function draw() {
+  layer.clearLayers();
+  const shown = all.filter(c =>
+    (!filterType || c.type === filterType) && (!onlyFavs || favs.has(keyOf(c))));
+  document.getElementById("count").textContent = shown.length + " מקומות";
+  shown.forEach(c => {
+    const g = "https://www.google.com/maps/search/" +
+      encodeURIComponent(c.name + ", " + (has(c.address) ? c.address + ", " : "") + "Vienna");
+    const place = [has(c.address) ? c.address : "", has(c.district_name) ? c.district_name : ""]
+      .filter(Boolean).join(" · ");
+    const html =
+      `<div class="pop-name">${esc(c.name)}${favs.has(keyOf(c)) ? " ❤️" : ""}</div>` +
+      `<div class="pop-type">${esc(c.type)}</div>` +
+      (has(c.what_to_eat) ? `<div class="pop-row">🍴 ${esc(c.what_to_eat.slice(0,150))}</div>` : "") +
+      (has(c.hours) ? `<div class="pop-row">🕐 ${esc(c.hours)}</div>` : "") +
+      (place ? `<div class="pop-row">📍 ${esc(place)}</div>` : "") +
+      `<div class="pop-links"><a href="${esc(c.article_url)}" target="_blank">לכתבה ↗</a>` +
+      `<a href="${g}" target="_blank">ניווט ↗</a></div>`;
+    L.marker([c.lat, c.lon]).bindPopup(html).addTo(layer);
+  });
+  if (!shown.length) toast("אין מקומות שמתאימים לסינון");
+}
+
+document.getElementById("locate").onclick = () => {
+  if (!navigator.geolocation) { toast("הדפדפן לא תומך באיתור מיקום"); return; }
+  toast("מאתר את המיקום שלך…", 12000);
+  navigator.geolocation.getCurrentPosition(pos => {
+    const { latitude: lat, longitude: lon } = pos.coords;
+    if (meMarker) map.removeLayer(meMarker);
+    meMarker = L.marker([lat, lon], {
+      icon: L.divIcon({ className: "", html: '<div class="me-dot"></div>', iconSize: [16,16] })
+    }).addTo(map).bindPopup("אתה כאן");
+    map.setView([lat, lon], 15);
+    const pool = all.filter(c => (!filterType || c.type === filterType) &&
+                                 (!onlyFavs || favs.has(keyOf(c))));
+    const near = pool.map(c => ({ c, d: km(lat, lon, c.lat, c.lon) }))
+      .sort((a, b) => a.d - b.d).slice(0, 5);
+    toast(near.length
+      ? "הכי קרוב: " + near.map(n => `${n.c.name} (${fmtKm(n.d)})`).join(" · ")
+      : "לא נמצאו מקומות בקרבתך", 10000);
+  }, err => {
+    if (err.code === err.PERMISSION_DENIED) {
+      navigator.permissions?.query({ name: "geolocation" }).then(st => {
+        toast(st.state === "denied"
+          ? "הדפדפן חוסם את המיקום. הקש על האייקון שמשמאל לכתובת ← הרשאות ← מיקום ← אפשר."
+          : "החלונית נסגרה בלי אישור. הקש שוב ובחר “אפשר”.", 10000);
+      }).catch(() => toast("לא אושרה גישה למיקום"));
+    } else {
+      toast("לא הצלחתי לאתר אותך. בדוק ששירותי המיקום מופעלים.", 8000);
+    }
+  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,112 @@
+name: שומר סף - וינה
+
+on:
+  schedule:
+    # 09:00 UTC - חמש שעות וחצי אחרי הסריקה הרגילה
+    - cron: "0 9 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: vienna
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: בדיקת תקינות קבצי ה-workflow
+        id: yamlcheck
+        run: |
+          pip install pyyaml -q
+          python - <<'PY'
+          import glob, sys, yaml, pathlib
+          bad = []
+          for f in sorted(glob.glob(".github/workflows/*.yml")):
+              try:
+                  d = yaml.safe_load(pathlib.Path(f).read_text(encoding="utf-8"))
+                  if not d.get("name"):
+                      bad.append(f + " - חסר name")
+              except Exception as e:
+                  bad.append(f + " - " + str(e).splitlines()[0])
+          pathlib.Path("yaml_report.txt").write_text("\n".join(bad), encoding="utf-8")
+          print("קבצים תקולים:", bad or "אין")
+          PY
+
+      - name: כמה זמן האתר לא התעדכן
+        id: age
+        run: |
+          pip install -r requirements.txt -q
+          python - <<'PY'
+          import json, os, pathlib
+          from datetime import datetime, timezone
+          d = json.loads(pathlib.Path("docs/data.json").read_text(encoding="utf-8"))
+          ts = d.get("last_run") or d.get("generated_at") or ""
+          try:
+              age = (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds() / 3600
+          except Exception:
+              age = 999.0
+          print("גיל הנתונים בשעות: %.1f" % age)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("hours=%.1f\n" % age)
+              f.write("stale=%s\n" % ("true" if age > 30 else "false"))
+          PY
+
+      - name: סריקת גיבוי
+        if: steps.age.outputs.stale == 'true'
+        run: python scraper.py
+
+      - name: שמירת עדכונים
+        if: steps.age.outputs.stale == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/data.json
+          if git diff --cached --quiet; then
+            echo "אין כרטיסים חדשים"
+          else
+            git commit -m "סריקת גיבוי (שומר סף): $(date -u +%Y-%m-%d)"
+            git push
+          fi
+
+      - name: התרעה - האתר תקוע או שיש workflow שבור
+        if: always() && (steps.age.outputs.stale == 'true' || failure())
+        uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HOURS: ${{ steps.age.outputs.hours }}
+        with:
+          script: |
+            const fs = require("fs");
+            let yamlBad = "";
+            try { yamlBad = fs.readFileSync("yaml_report.txt", "utf8").trim(); } catch (e) {}
+            const NL = String.fromCharCode(10);
+            const lines = [
+              "**שומר הסף זיהה בעיה.**", "",
+              "האתר לא התעדכן כבר " + (process.env.HOURS || "?") + " שעות.", "",
+              yamlBad ? "קבצי workflow שבורים:" + NL + "```" + NL + yamlBad + NL + "```" : "",
+              "[צפייה בפרטי הריצה](" + process.env.RUN_URL + ")"
+            ].filter(Boolean);
+            const title = "🚨 האתר לא מתעדכן";
+            const {data: open} = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: "open", labels: "watchdog" });
+            const body = lines.join(NL);
+            if (open.length) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: open[0].number, body });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ["watchdog"], assignees: [context.repo.owner] });
+            }
