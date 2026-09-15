@@ -240,7 +240,8 @@ function cardHtml(c) {
   <div class="card${c.photo ? "" : " nopic"}">
     <button class="fav${favs.has(k) ? " on" : ""}" data-k="${esc(k)}"
             title="מועדפים">${favs.has(k) ? "♥" : "♡"}</button>
-    ${c.photo ? `<img loading="lazy" src="${esc(c.photo)}" alt="${esc(c.name)}">` : ""}
+    ${c.photo ? `<img loading="lazy" src="${esc(c.photo)}" alt="${esc(c.name)}"
+        onerror="this.closest('.card').classList.add('nopic'); this.remove();">` : ""}
     <div class="card-body">
       <h3 class="name">${esc(c.name)}${c.is_new ? '<span class="badge">חדש</span>' : ""}</h3>
       <div class="type">${esc(c.type)}</div>
